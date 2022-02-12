@@ -1,2 +1,2 @@
 # dataVisPy
-MEG Data visusualization
+MEG Data visualization
