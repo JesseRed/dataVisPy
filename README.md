@@ -1,2 +1,1 @@
 # dataVisPy
-MEG Data visualization
