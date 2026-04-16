@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import scipy.stats as stats
 from dash import Dash, Input, Output, State, dcc, html
 
 from data_vis_py.io.dataset_loader import DatasetBundle, load_dataset
@@ -73,6 +74,20 @@ def create_dashboard(
                                     dcc.Graph(id="heatmap"),
                                     dcc.Graph(id="subject-bar-chart"),
                                     html.Div(id="subject-bar-stats", className="panel"),
+                                    html.Div(
+                                        [
+                                            html.Label("Correlation variable"),
+                                            dcc.Dropdown(
+                                                id="heatmap-correlation-variable",
+                                                options=[{"label": column, "value": column} for column in numeric_subject_columns],
+                                                value=numeric_subject_columns[0] if numeric_subject_columns else None,
+                                                clearable=True,
+                                            ),
+                                        ],
+                                        className="panel",
+                                    ),
+                                    dcc.Graph(id="heatmap-correlation-chart"),
+                                    html.Div(id="heatmap-correlation-stats", className="panel"),
                                 ],
                             ),
                             dcc.Tab(
@@ -114,6 +129,8 @@ def create_dashboard(
         Output("group-b", "value"),
         Output("correlation-variable", "options"),
         Output("correlation-variable", "value"),
+        Output("heatmap-correlation-variable", "options"),
+        Output("heatmap-correlation-variable", "value"),
         Output("regression-covariates", "options"),
         Output("regression-covariates", "value"),
         Input("json-file", "value"),
@@ -133,7 +150,18 @@ def create_dashboard(
         default_group = groups[0] if groups else None
         default_corr = numeric_columns[0] if numeric_columns else None
         default_regression = numeric_columns[:2]
-        return group_options, default_group, group_options, default_group, numeric_options, default_corr, numeric_options, default_regression
+        return (
+            group_options,
+            default_group,
+            group_options,
+            default_group,
+            numeric_options,
+            default_corr,
+            numeric_options,
+            default_corr,
+            numeric_options,
+            default_regression,
+        )
 
     @app.callback(
         Output("freq-min", "value"),
@@ -192,6 +220,8 @@ def create_dashboard(
         Output("heatmap", "figure"),
         Output("subject-bar-chart", "figure"),
         Output("subject-bar-stats", "children"),
+        Output("heatmap-correlation-chart", "figure"),
+        Output("heatmap-correlation-stats", "children"),
         Output("pair-summary", "children"),
         Output("pair-detail-chart", "figure"),
         Output("covariate-summary", "children"),
@@ -214,6 +244,7 @@ def create_dashboard(
         Input("display-mode", "value"),
         Input("correlation-method", "value"),
         Input("correlation-variable", "value"),
+        Input("heatmap-correlation-variable", "value"),
         Input("regression-covariates", "value"),
         Input("selected-pair", "data"),
     )
@@ -236,9 +267,10 @@ def create_dashboard(
         display_mode: str,
         correlation_method: str,
         correlation_variable: str | None,
+        heatmap_correlation_variable: str | None,
         regression_covariates: list[str] | None,
         selected_pair: str,
-    ) -> tuple[Any, Any, go.Figure, go.Figure, Any, Any, go.Figure, Any, go.Figure]:
+    ) -> tuple[Any, Any, go.Figure, go.Figure, Any, go.Figure, Any, Any, go.Figure, Any, go.Figure]:
         bundle = current_bundle(json_filename, csv_filename)
         longitudinal_enabled = "enabled" in (longitudinal_enabled_flags or [])
         if BAND_PRESETS.get(band_preset):
@@ -274,6 +306,14 @@ def create_dashboard(
             correlation_method=correlation_method,
             correlation_variable=correlation_variable,
             regression_covariates=regression_covariates,
+        )
+        heatmap_correlation_result = run_covariate_analysis(
+            bundle,
+            analysis_result,
+            selected_pair,
+            correlation_method=correlation_method,
+            correlation_variable=heatmap_correlation_variable,
+            regression_covariates=None,
         )
 
         summary_component = html.Div(
@@ -323,10 +363,26 @@ def create_dashboard(
         )
         subject_bar_figure = _build_subject_bar_chart(pair_summary, effective_analysis_mode)
         subject_bar_stats = _build_subject_bar_stats(pair_summary)
+        heatmap_corr_figure, heatmap_corr_stats = _build_heatmap_correlation_view(
+            heatmap_correlation_result,
+            heatmap_correlation_variable,
+        )
 
         pair_component, pair_figure = _build_detail_view(pair_summary, effective_analysis_mode)
         cov_component, cov_figure = _build_covariate_view(covariate_result, effective_analysis_mode, correlation_variable)
-        return summary_component, heatmap_description, heatmap_figure, subject_bar_figure, subject_bar_stats, pair_component, pair_figure, cov_component, cov_figure
+        return (
+            summary_component,
+            heatmap_description,
+            heatmap_figure,
+            subject_bar_figure,
+            subject_bar_stats,
+            heatmap_corr_figure,
+            heatmap_corr_stats,
+            pair_component,
+            pair_figure,
+            cov_component,
+            cov_figure,
+        )
 
     return app
 
@@ -480,13 +536,36 @@ def _build_heatmap(analysis_result: dict[str, Any], display_mode: str, selected_
             value = z_values[i, j]
             value_text[i, j] = "" if np.isnan(value) else f"{value:.3f}"
 
+    colorscale: str | list[list[float | str]] = "RdBu_r" if display_mode == "effect" else "Viridis"
+    zmid: float | None = 0 if display_mode == "effect" else None
+    zmin: float | None = None
+    zmax: float | None = None
+    if display_mode == "p":
+        # Split p-value coloring at 0.05: autumn-like tones for significant values,
+        # ocean-like tones for non-significant values.
+        colorscale = [
+            [0.00, "#8c2d04"],
+            [0.02, "#cc4c02"],
+            [0.035, "#ec7014"],
+            [0.05, "#fe9929"],
+            [0.05, "#c7e9b4"],
+            [0.20, "#41b6c4"],
+            [0.45, "#1d91c0"],
+            [0.70, "#225ea8"],
+            [1.00, "#081d58"],
+        ]
+        zmin = 0.0
+        zmax = 1.0
+
     figure = go.Figure(
         data=go.Heatmap(
             z=z_values,
             x=analysis_result["roi_order"],
             y=analysis_result["roi_order"],
-            colorscale="RdBu_r" if display_mode == "effect" else "Viridis",
-            zmid=0 if display_mode == "effect" else None,
+            colorscale=colorscale,
+            zmid=zmid,
+            zmin=zmin,
+            zmax=zmax,
             text=value_text,
             customdata=pair_text,
             texttemplate="%{text}",
@@ -726,6 +805,106 @@ def _build_subject_bar_stats(pair_summary: dict[str, Any] | None) -> Any:
             ),
         ]
     )
+
+
+def _build_heatmap_correlation_view(
+    covariate_result: dict[str, Any],
+    correlation_variable: str | None,
+) -> tuple[go.Figure, Any]:
+    figure = go.Figure()
+    if covariate_result.get("message"):
+        figure.update_layout(title="Delta vs variable", height=420)
+        return figure, html.P(covariate_result["message"])
+
+    correlation = covariate_result.get("correlation")
+    if not correlation_variable:
+        figure.update_layout(title="Delta vs variable", height=420)
+        return figure, html.P("Select a variable to compute correlation statistics for the selected edge.")
+    if not correlation:
+        figure.update_layout(title=f"Delta vs {correlation_variable}", height=420)
+        return figure, html.P("No correlation output available.")
+    if "message" in correlation:
+        figure.update_layout(title=f"Delta vs {correlation_variable}", height=420)
+        return figure, html.P(correlation["message"])
+    if "x" not in correlation or "y" not in correlation:
+        figure.update_layout(title=f"Delta vs {correlation_variable}", height=420)
+        return figure, html.P("No scatter data available.")
+
+    x = np.asarray(correlation["x"], dtype=float)
+    y = np.asarray(correlation["y"], dtype=float)
+    mask = ~np.isnan(x) & ~np.isnan(y)
+    x = x[mask]
+    y = y[mask]
+    if len(x) < 3:
+        figure.update_layout(title=f"Delta vs {correlation_variable}", height=420)
+        return figure, html.P("Not enough complete observations for correlation.")
+
+    fit = stats.linregress(x, y)
+    order = np.argsort(x)
+    x_sorted = x[order]
+    y_hat_sorted = fit.intercept + fit.slope * x_sorted
+    residuals = y - (fit.intercept + fit.slope * x)
+    sse = float(np.sum(residuals**2))
+    rmse = float(np.sqrt(sse / max(len(x) - 2, 1)))
+
+    figure.add_trace(
+        go.Scatter(
+            x=x.tolist(),
+            y=y.tolist(),
+            mode="markers",
+            name="Subjects",
+            marker={"size": 8, "color": "#1f77b4", "opacity": 0.85},
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=x_sorted.tolist(),
+            y=y_hat_sorted.tolist(),
+            mode="lines",
+            name="Linear fit",
+            line={"color": "#d62728", "width": 2},
+        )
+    )
+    figure.update_layout(
+        title=f"Connectivity delta vs {correlation_variable}",
+        xaxis_title=correlation_variable,
+        yaxis_title="Connectivity delta",
+        height=420,
+        legend={"orientation": "h", "x": 0, "y": 1.12},
+    )
+
+    stats_rows = [
+        ("Method", f"{correlation['method'].title()} correlation"),
+        ("n", str(len(x))),
+        ("r / rho", f"{correlation['statistic']:.6f}"),
+        ("p-value", f"{correlation['p_value']:.6g}"),
+        ("Slope", f"{fit.slope:.6f}"),
+        ("Intercept", f"{fit.intercept:.6f}"),
+        ("R^2", f"{fit.rvalue**2:.6f}"),
+        ("Slope stderr", f"{fit.stderr:.6f}" if fit.stderr is not None else "n/a"),
+        ("Intercept stderr", f"{fit.intercept_stderr:.6f}" if fit.intercept_stderr is not None else "n/a"),
+        ("Fit p-value", f"{fit.pvalue:.6g}"),
+        ("RMSE", f"{rmse:.6f}"),
+    ]
+
+    stats_table = html.Table(
+        [
+            html.Tbody(
+                [
+                    html.Tr(
+                        [
+                            html.Td(label, style=_stats_cell_style(label=True)),
+                            html.Td(value, style=_stats_cell_style()),
+                        ]
+                    )
+                    for label, value in stats_rows
+                ]
+            )
+        ],
+        style=_stats_table_style(),
+    )
+
+    return figure, html.Div([html.H4("Correlation statistics"), stats_table])
 
 
 def _stats_table_style() -> dict[str, str]:
