@@ -50,6 +50,10 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn("correction_label", result)
         first_pair = result["pair_results"][0]
         self.assertIn("q_value", first_pair)
+        self.assertIn("q_value_fdr_bh", first_pair)
+        self.assertIn("q_value_bonferroni", first_pair)
+        self.assertIn("q_value_holm", first_pair)
+        self.assertIn("group_stats", first_pair)
         self.assertIn("detail_records", first_pair)
         self.assertGreaterEqual(first_pair["n"], 1)
 
@@ -242,6 +246,11 @@ class AnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(pair["mean_delta"], 4.0)
         self.assertEqual(pair["n_group_a"], 2)
         self.assertEqual(pair["n_group_b"], 2)
+        self.assertEqual(len(pair["group_stats"]), 2)
+        self.assertEqual(pair["group_stats"][0]["group_label"], "A")
+        self.assertEqual(pair["group_stats"][1]["group_label"], "B")
+        self.assertAlmostEqual(pair["group_stats"][0]["mean"], 1.5)
+        self.assertAlmostEqual(pair["group_stats"][1]["mean"], 5.5)
 
 
 if __name__ == "__main__":

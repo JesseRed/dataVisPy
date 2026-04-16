@@ -72,6 +72,7 @@ def create_dashboard(
                                     html.Div(id="heatmap-description", className="panel"),
                                     dcc.Graph(id="heatmap"),
                                     dcc.Graph(id="subject-bar-chart"),
+                                    html.Div(id="subject-bar-stats", className="panel"),
                                 ],
                             ),
                             dcc.Tab(
@@ -190,6 +191,7 @@ def create_dashboard(
         Output("heatmap-description", "children"),
         Output("heatmap", "figure"),
         Output("subject-bar-chart", "figure"),
+        Output("subject-bar-stats", "children"),
         Output("pair-summary", "children"),
         Output("pair-detail-chart", "figure"),
         Output("covariate-summary", "children"),
@@ -236,7 +238,7 @@ def create_dashboard(
         correlation_variable: str | None,
         regression_covariates: list[str] | None,
         selected_pair: str,
-    ) -> tuple[Any, Any, go.Figure, go.Figure, Any, go.Figure, Any, go.Figure]:
+    ) -> tuple[Any, Any, go.Figure, go.Figure, Any, Any, go.Figure, Any, go.Figure]:
         bundle = current_bundle(json_filename, csv_filename)
         longitudinal_enabled = "enabled" in (longitudinal_enabled_flags or [])
         if BAND_PRESETS.get(band_preset):
@@ -320,10 +322,11 @@ def create_dashboard(
             selected_pair=selected_pair,
         )
         subject_bar_figure = _build_subject_bar_chart(pair_summary, effective_analysis_mode)
+        subject_bar_stats = _build_subject_bar_stats(pair_summary)
 
         pair_component, pair_figure = _build_detail_view(pair_summary, effective_analysis_mode)
         cov_component, cov_figure = _build_covariate_view(covariate_result, effective_analysis_mode, correlation_variable)
-        return summary_component, heatmap_description, heatmap_figure, subject_bar_figure, pair_component, pair_figure, cov_component, cov_figure
+        return summary_component, heatmap_description, heatmap_figure, subject_bar_figure, subject_bar_stats, pair_component, pair_figure, cov_component, cov_figure
 
     return app
 
@@ -541,59 +544,223 @@ def _build_subject_bar_chart(pair_summary: dict[str, Any] | None, analysis_mode:
         figure.update_layout(title="Subject values for selected edge")
         return figure
 
-    bar_colors = None
-    if "group_label" in detail_frame.columns:
-        unique_groups = list(dict.fromkeys(detail_frame["group_label"].astype(str).tolist()))
-        palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd"]
-        color_map = {group: palette[index % len(palette)] for index, group in enumerate(unique_groups)}
-        bar_colors = detail_frame["group_label"].astype(str).map(color_map).tolist()
-
     if analysis_mode == "trial_delta":
-        figure.add_trace(
-            go.Bar(
-                x=detail_frame["subject_id"],
-                y=detail_frame["delta"],
-                name="Delta",
-                marker={"color": bar_colors} if bar_colors else None,
-            )
-        )
-        figure.update_layout(
-            title=f"Subject deltas for {pair_summary['roi_from']} -> {pair_summary['roi_to']}",
-            xaxis_title="Subject",
-            yaxis_title="Trial B - Trial A",
-            height=360,
-        )
+        id_column = "subject_id"
+        y_column = "delta"
+        chart_title = f"Subject deltas for {pair_summary['roi_from']} -> {pair_summary['roi_to']}"
+        yaxis_title = "Trial B - Trial A"
     elif analysis_mode == "session_delta":
-        figure.add_trace(
-            go.Bar(
-                x=detail_frame["base_subject_id"],
-                y=detail_frame["delta"],
-                name="M2 - M1",
-                marker={"color": bar_colors} if bar_colors else None,
-            )
-        )
-        figure.update_layout(
-            title=f"Session deltas for {pair_summary['roi_from']} -> {pair_summary['roi_to']}",
-            xaxis_title="Subject",
-            yaxis_title="M2 - M1",
-            height=360,
-        )
+        id_column = "base_subject_id"
+        y_column = "delta"
+        chart_title = f"Session deltas for {pair_summary['roi_from']} -> {pair_summary['roi_to']}"
+        yaxis_title = "M2 - M1"
     else:
+        id_column = "base_subject_id"
+        y_column = "delta"
+        chart_title = f"Longitudinal delta differences for {pair_summary['roi_from']} -> {pair_summary['roi_to']}"
+        yaxis_title = "Delta(B) - Delta(A)"
+
+    if "group_label" not in detail_frame.columns:
+        detail_frame["group_label"] = "All"
+    detail_frame["group_label"] = detail_frame["group_label"].astype(str)
+
+    group_order = [entry["group_label"] for entry in pair_summary.get("group_stats", [])]
+    if not group_order:
+        group_order = list(dict.fromkeys(detail_frame["group_label"].tolist()))
+
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd"]
+    color_map = {group: palette[index % len(palette)] for index, group in enumerate(group_order)}
+
+    category_array: list[str] = []
+    has_multiple_groups = len(group_order) > 1
+    for index, group_name in enumerate(group_order):
+        group_frame = detail_frame[detail_frame["group_label"] == group_name].copy()
+        if group_frame.empty:
+            continue
+        group_frame[id_column] = group_frame[id_column].astype(str)
         figure.add_trace(
             go.Bar(
-                x=detail_frame["base_subject_id"],
-                y=detail_frame["delta"],
-                name="Longitudinal delta difference",
-                marker={"color": bar_colors} if bar_colors else None,
+                x=group_frame[id_column],
+                y=group_frame[y_column],
+                name=group_name,
+                marker={"color": color_map[group_name]},
+                customdata=np.column_stack(
+                    [
+                        group_frame[id_column],
+                        group_frame["group_label"],
+                    ]
+                ),
+                hovertemplate="ID=%{customdata[0]}<br>Group=%{customdata[1]}<br>Delta=%{y:.4f}<extra></extra>",
             )
         )
-        figure.update_layout(
-            title=f"Longitudinal delta differences for {pair_summary['roi_from']} -> {pair_summary['roi_to']}",
-            xaxis_title="IDX",
-            yaxis_title="Delta(B) - Delta(A)",
-            height=360,
-        )
+        category_array.extend(group_frame[id_column].tolist())
+        if has_multiple_groups and index < len(group_order) - 1:
+            category_array.append(f"__gap__{index}")
+            figure.add_trace(
+                go.Bar(
+                    x=[f"__gap__{index}"],
+                    y=[0],
+                    name="",
+                    marker={"color": "rgba(0,0,0,0)"},
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+
+    tick_text = ["" if value.startswith("__gap__") else value for value in category_array]
+    figure.update_layout(
+        title=chart_title,
+        xaxis={
+            "title": "IDX" if analysis_mode != "trial_delta" else "Subject",
+            "categoryorder": "array",
+            "categoryarray": category_array,
+            "tickmode": "array",
+            "tickvals": category_array,
+            "ticktext": tick_text,
+        },
+        yaxis_title=yaxis_title,
+        barmode="overlay",
+        bargap=0.18,
+        height=420,
+        legend_title="Group",
+    )
     return figure
+
+
+def _build_subject_bar_stats(pair_summary: dict[str, Any] | None) -> Any:
+    if not pair_summary:
+        return html.P("Select an edge in the heatmap to view descriptive and inferential statistics.")
+
+    def format_stat(value: Any, digits: int = 6) -> str:
+        if value is None or pd.isna(value):
+            return "n/a"
+        return f"{float(value):.{digits}f}"
+
+    group_stats = pair_summary.get("group_stats", [])
+    if not group_stats:
+        group_stats = [
+            {
+                "group_label": "Group 1",
+                "n": pair_summary.get("n_group_a", pair_summary["n"]),
+                "mean": np.nan,
+                "median": np.nan,
+                "std": np.nan,
+                "sem": np.nan,
+            }
+        ]
+
+    metric_rows = [
+        ("n", [str(group["n"]) for group in group_stats]),
+        ("Mean", [format_stat(group["mean"]) for group in group_stats]),
+        ("Median", [format_stat(group["median"]) for group in group_stats]),
+        ("SD", [format_stat(group["std"]) for group in group_stats]),
+        ("SEM", [format_stat(group["sem"]) for group in group_stats]),
+    ]
+
+    inferential_rows = [
+        ("Total n", str(pair_summary["n"])),
+        ("t", format_stat(pair_summary.get("statistic"))),
+        ("Effect size", format_stat(pair_summary.get("effect_size"))),
+        ("p uncorr.", format_stat(pair_summary.get("p_value"))),
+        ("q FDR-BH", format_stat(pair_summary.get("q_value_fdr_bh"))),
+        ("q Bonferroni", format_stat(pair_summary.get("q_value_bonferroni"))),
+        ("q Holm", format_stat(pair_summary.get("q_value_holm"))),
+    ]
+
+    descriptive_header = [
+        html.Thead(
+            html.Tr(
+                [html.Th("Metric", style=_stats_cell_style(header=True))]
+                + [html.Th(group["group_label"], style=_stats_cell_style(header=True)) for group in group_stats]
+            )
+        )
+    ]
+    descriptive_body = [
+        html.Tbody(
+            [
+                html.Tr(
+                    [html.Td(label, style=_stats_cell_style(label=True))]
+                    + [html.Td(value, style=_stats_cell_style()) for value in values]
+                )
+                for label, values in metric_rows
+            ]
+        )
+    ]
+
+    inferential_table = html.Table(
+        [
+            html.Tbody(
+                [
+                    html.Tr(
+                        [
+                            html.Td(label, style=_stats_cell_style(label=True)),
+                            html.Td(value, style=_stats_cell_style()),
+                        ]
+                    )
+                    for label, value in inferential_rows
+                ]
+            )
+        ],
+        style=_stats_table_style(),
+    )
+
+    return html.Div(
+        [
+            html.H4(f"Statistics for {pair_summary['roi_from']} -> {pair_summary['roi_to']}", style={"marginBottom": "8px"}),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div("Descriptive", style=_stats_section_title_style()),
+                            html.Table(descriptive_header + descriptive_body, style=_stats_table_style()),
+                        ]
+                    ),
+                    html.Div(
+                        [
+                            html.Div("Inferential", style=_stats_section_title_style()),
+                            inferential_table,
+                        ]
+                    ),
+                ],
+                style={"display": "grid", "gridTemplateColumns": "minmax(0, 2fr) minmax(240px, 1fr)", "gap": "14px"},
+            ),
+        ]
+    )
+
+
+def _stats_table_style() -> dict[str, str]:
+    return {
+        "width": "100%",
+        "borderCollapse": "collapse",
+        "fontSize": "13px",
+        "backgroundColor": "#ffffff",
+        "border": "1px solid #d9dde3",
+    }
+
+
+def _stats_cell_style(*, header: bool = False, label: bool = False) -> dict[str, str]:
+    style = {
+        "padding": "7px 10px",
+        "border": "1px solid #d9dde3",
+        "textAlign": "left",
+        "verticalAlign": "middle",
+    }
+    if header:
+        style.update({"backgroundColor": "#eef2f7", "fontWeight": "600"})
+    elif label:
+        style.update({"backgroundColor": "#f8fafc", "fontWeight": "600", "whiteSpace": "nowrap"})
+    return style
+
+
+def _stats_section_title_style() -> dict[str, str]:
+    return {
+        "fontSize": "12px",
+        "fontWeight": "700",
+        "letterSpacing": "0.04em",
+        "textTransform": "uppercase",
+        "color": "#445066",
+        "marginBottom": "6px",
+    }
 
 
 def _build_detail_view(pair_summary: dict[str, Any] | None, analysis_mode: str) -> tuple[Any, go.Figure]:

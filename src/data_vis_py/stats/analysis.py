@@ -14,6 +14,9 @@ from statsmodels.stats.multitest import multipletests
 from data_vis_py.io.dataset_loader import DatasetBundle
 
 
+CORRECTION_METHODS = ("none", "fdr_bh", "bonferroni", "holm")
+
+
 @dataclass(frozen=True)
 class AnalysisConfig:
     """Settings for a single analysis request."""
@@ -381,6 +384,7 @@ def _within_group_results(frame: pd.DataFrame, detail_columns: list[str], mode: 
     for (roi_from, roi_to), group in frame.groupby(["roi_from", "roi_to"], sort=True):
         deltas = group["delta"].to_numpy(dtype=float)
         n_obs = len(group)
+        group_name = str(group["group_label"].iloc[0]) if n_obs else "Group 1"
         if mode == "trial_delta":
             a_values = group["trial_a_value"].to_numpy(dtype=float)
             b_values = group["trial_b_value"].to_numpy(dtype=float)
@@ -410,6 +414,9 @@ def _within_group_results(frame: pd.DataFrame, detail_columns: list[str], mode: 
                 "n": int(n_obs),
                 "n_group_a": int(n_obs),
                 "n_group_b": int(n_obs),
+                "group_stats": [
+                    _group_summary(group_name, deltas),
+                ],
                 "detail_records": group[detail_columns].to_dict(orient="records"),
             }
         )
@@ -446,6 +453,10 @@ def _between_group_results(frame: pd.DataFrame, detail_columns: list[str], group
                 "n": int(n_a + n_b),
                 "n_group_a": int(n_a),
                 "n_group_b": int(n_b),
+                "group_stats": [
+                    _group_summary(group_a, delta_a),
+                    _group_summary(group_b, delta_b),
+                ],
                 "detail_records": group[detail_columns].to_dict(orient="records"),
             }
         )
@@ -458,15 +469,45 @@ def _attach_q_values(results: pd.DataFrame, correction_method: str) -> pd.DataFr
         return results
     results = results.copy()
     mask = results["p_value"].notna()
-    q_values = np.full(len(results), np.nan)
-    if mask.any():
-        if correction_method == "none":
-            q_values[np.where(mask)[0]] = results.loc[mask, "p_value"].to_numpy()
-        else:
-            _, corrected, _, _ = multipletests(results.loc[mask, "p_value"], method=correction_method)
-            q_values[np.where(mask)[0]] = corrected
-    results["q_value"] = q_values
+    mask_indices = np.where(mask)[0]
+
+    for method in CORRECTION_METHODS:
+        corrected_values = np.full(len(results), np.nan)
+        if mask.any():
+            if method == "none":
+                corrected_values[mask_indices] = results.loc[mask, "p_value"].to_numpy()
+            else:
+                _, corrected, _, _ = multipletests(results.loc[mask, "p_value"], method=method)
+                corrected_values[mask_indices] = corrected
+        results[f"q_value_{method}"] = corrected_values
+
+    results["q_value"] = results[f"q_value_{correction_method}"]
     return results
+
+
+def _group_summary(group_name: str, deltas: np.ndarray) -> dict[str, Any]:
+    deltas = np.asarray(deltas, dtype=float)
+    n_obs = len(deltas)
+    if n_obs == 0:
+        return {
+            "group_label": group_name,
+            "n": 0,
+            "mean": np.nan,
+            "median": np.nan,
+            "std": np.nan,
+            "sem": np.nan,
+        }
+
+    std = float(np.std(deltas, ddof=1)) if n_obs >= 2 else np.nan
+    sem = float(stats.sem(deltas, nan_policy="omit")) if n_obs >= 2 else np.nan
+    return {
+        "group_label": group_name,
+        "n": int(n_obs),
+        "mean": float(np.mean(deltas)),
+        "median": float(np.median(deltas)),
+        "std": std,
+        "sem": sem,
+    }
 
 
 def _correction_label(correction_method: str) -> str:
