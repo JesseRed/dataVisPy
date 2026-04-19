@@ -16,12 +16,23 @@ from data_vis_py.stats.analysis import (
     ALL_GROUPS_LABEL,
     ALL_GROUPS_VALUE,
     AnalysisConfig,
+    LongitudinalDetailConfig,
+    NetworkAnalysisConfig,
+    PatternsAnalysisConfig,
     SELECTED_EDGE_DELTA_VALUE,
+    build_patterns_feature_data,
+    derive_roi_metadata,
     run_analysis,
     run_covariate_analysis,
+    run_leave_one_out_analysis,
+    run_longitudinal_detail_analysis,
     run_multivariate_regression_analysis,
+    run_network_analysis,
+    run_patterns_analysis,
+    run_regression_influence_analysis,
     summarize_pair_result,
 )
+from data_vis_py.ui.dashboard import create_dashboard
 
 
 def make_regression_test_bundle() -> DatasetBundle:
@@ -94,6 +105,230 @@ def make_regression_test_bundle() -> DatasetBundle:
         dataset_id="synthetic",
         metric="conn_coh",
         channels=["roi_a", "roi_b"],
+        trial_ids=[1, 2],
+        frequencies=[10.0],
+        subjects=subjects,
+        connectivity=pd.DataFrame(connectivity_rows),
+    )
+
+
+def make_outlier_test_bundle() -> DatasetBundle:
+    subjects = pd.DataFrame(
+        [
+            {"dataset_id": "synthetic", "subject_id": "A1", "idx": "1", "base_subject_id": "1", "group_label": "A", "mtime": "M1", "age": 10.0},
+            {"dataset_id": "synthetic", "subject_id": "A2", "idx": "2", "base_subject_id": "2", "group_label": "A", "mtime": "M1", "age": 20.0},
+            {"dataset_id": "synthetic", "subject_id": "B1", "idx": "3", "base_subject_id": "3", "group_label": "B", "mtime": "M1", "age": 30.0},
+            {"dataset_id": "synthetic", "subject_id": "B2", "idx": "4", "base_subject_id": "4", "group_label": "B", "mtime": "M1", "age": 40.0},
+        ]
+    )
+    deltas = {"A1": 1.0, "A2": 1.0, "B1": 1.0, "B2": 10.0}
+    connectivity_rows = []
+    for subject_id, delta in deltas.items():
+        subject_row = subjects.loc[subjects["subject_id"] == subject_id].iloc[0]
+        connectivity_rows.extend(
+            [
+                {
+                    "dataset_id": "synthetic",
+                    "metric": "conn_coh",
+                    "subject_id": subject_id,
+                    "idx": subject_row["idx"],
+                    "base_subject_id": subject_row["base_subject_id"],
+                    "group_label": subject_row["group_label"],
+                    "mtime": subject_row["mtime"],
+                    "trial_id": 1,
+                    "freq": 10.0,
+                    "roi_from": "roi_a",
+                    "roi_to": "roi_b",
+                    "value": 0.0,
+                },
+                {
+                    "dataset_id": "synthetic",
+                    "metric": "conn_coh",
+                    "subject_id": subject_id,
+                    "idx": subject_row["idx"],
+                    "base_subject_id": subject_row["base_subject_id"],
+                    "group_label": subject_row["group_label"],
+                    "mtime": subject_row["mtime"],
+                    "trial_id": 2,
+                    "freq": 10.0,
+                    "roi_from": "roi_a",
+                    "roi_to": "roi_b",
+                    "value": float(delta),
+                },
+            ]
+        )
+    return DatasetBundle(
+        dataset_id="synthetic",
+        metric="conn_coh",
+        channels=["roi_a", "roi_b"],
+        trial_ids=[1, 2],
+        frequencies=[10.0],
+        subjects=subjects,
+        connectivity=pd.DataFrame(connectivity_rows),
+    )
+
+
+def make_longitudinal_detail_bundle() -> DatasetBundle:
+    subjects = pd.DataFrame(
+        [
+            {"dataset_id": "synthetic", "subject_id": "A1_M1", "idx": "1", "base_subject_id": "1", "group_label": "A", "mtime": "M1", "age": 50.0},
+            {"dataset_id": "synthetic", "subject_id": "A1_M2", "idx": "1", "base_subject_id": "1", "group_label": "A", "mtime": "M2", "age": 50.0},
+            {"dataset_id": "synthetic", "subject_id": "A1_M3", "idx": "1", "base_subject_id": "1", "group_label": "A", "mtime": "M3", "age": 50.0},
+            {"dataset_id": "synthetic", "subject_id": "A2_M1", "idx": "2", "base_subject_id": "2", "group_label": "A", "mtime": "M1", "age": 55.0},
+            {"dataset_id": "synthetic", "subject_id": "A2_M2", "idx": "2", "base_subject_id": "2", "group_label": "A", "mtime": "M2", "age": 55.0},
+            {"dataset_id": "synthetic", "subject_id": "A2_M3", "idx": "2", "base_subject_id": "2", "group_label": "A", "mtime": "M3", "age": 55.0},
+            {"dataset_id": "synthetic", "subject_id": "B1_M1", "idx": "3", "base_subject_id": "3", "group_label": "B", "mtime": "M1", "age": 60.0},
+            {"dataset_id": "synthetic", "subject_id": "B1_M2", "idx": "3", "base_subject_id": "3", "group_label": "B", "mtime": "M2", "age": 60.0},
+            {"dataset_id": "synthetic", "subject_id": "B1_M3", "idx": "3", "base_subject_id": "3", "group_label": "B", "mtime": "M3", "age": 60.0},
+            {"dataset_id": "synthetic", "subject_id": "B2_M1", "idx": "4", "base_subject_id": "4", "group_label": "B", "mtime": "M1", "age": 65.0},
+            {"dataset_id": "synthetic", "subject_id": "B2_M2", "idx": "4", "base_subject_id": "4", "group_label": "B", "mtime": "M2", "age": 65.0},
+            {"dataset_id": "synthetic", "subject_id": "B2_M3", "idx": "4", "base_subject_id": "4", "group_label": "B", "mtime": "M3", "age": 65.0},
+        ]
+    )
+    delta_lookup = {
+        "A1_M1": 1.0,
+        "A1_M2": 1.5,
+        "A1_M3": 2.0,
+        "A2_M1": 1.2,
+        "A2_M2": 1.8,
+        "A2_M3": 2.3,
+        "B1_M1": 1.0,
+        "B1_M2": 2.4,
+        "B1_M3": 3.2,
+        "B2_M1": 1.1,
+        "B2_M2": 2.6,
+        "B2_M3": 3.4,
+    }
+    connectivity_rows = []
+    for subject_id, delta in delta_lookup.items():
+        subject_row = subjects.loc[subjects["subject_id"] == subject_id].iloc[0]
+        connectivity_rows.extend(
+            [
+                {
+                    "dataset_id": "synthetic",
+                    "metric": "conn_coh",
+                    "subject_id": subject_id,
+                    "idx": subject_row["idx"],
+                    "base_subject_id": subject_row["base_subject_id"],
+                    "group_label": subject_row["group_label"],
+                    "mtime": subject_row["mtime"],
+                    "trial_id": 1,
+                    "freq": 10.0,
+                    "roi_from": "roi_a",
+                    "roi_to": "roi_b",
+                    "value": 0.0,
+                },
+                {
+                    "dataset_id": "synthetic",
+                    "metric": "conn_coh",
+                    "subject_id": subject_id,
+                    "idx": subject_row["idx"],
+                    "base_subject_id": subject_row["base_subject_id"],
+                    "group_label": subject_row["group_label"],
+                    "mtime": subject_row["mtime"],
+                    "trial_id": 2,
+                    "freq": 10.0,
+                    "roi_from": "roi_a",
+                    "roi_to": "roi_b",
+                    "value": float(delta),
+                },
+            ]
+        )
+    return DatasetBundle(
+        dataset_id="synthetic",
+        metric="conn_coh",
+        channels=["roi_a", "roi_b"],
+        trial_ids=[1, 2],
+        frequencies=[10.0],
+        subjects=subjects,
+        connectivity=pd.DataFrame(connectivity_rows),
+    )
+
+
+def make_network_test_bundle() -> DatasetBundle:
+    subjects = pd.DataFrame(
+        [
+            {"dataset_id": "synthetic", "subject_id": "A1", "idx": "1", "base_subject_id": "1", "group_label": "A", "mtime": "M1", "age": 55.0, "score": 3.0},
+            {"dataset_id": "synthetic", "subject_id": "A2", "idx": "2", "base_subject_id": "2", "group_label": "A", "mtime": "M1", "age": 61.0, "score": 4.0},
+            {"dataset_id": "synthetic", "subject_id": "B1", "idx": "3", "base_subject_id": "3", "group_label": "B", "mtime": "M1", "age": 70.0, "score": 8.0},
+            {"dataset_id": "synthetic", "subject_id": "B2", "idx": "4", "base_subject_id": "4", "group_label": "B", "mtime": "M1", "age": 72.0, "score": 7.0},
+        ]
+    )
+    rois = ["frontal_left", "frontal_right", "parietal_left", "parietal_right"]
+    pair_values = {
+        "A1": {
+            ("frontal_left", "frontal_right"): 0.9,
+            ("frontal_left", "parietal_left"): 0.8,
+            ("frontal_left", "parietal_right"): 0.3,
+            ("frontal_right", "parietal_left"): 0.2,
+            ("frontal_right", "parietal_right"): 0.4,
+            ("parietal_left", "parietal_right"): 0.7,
+        },
+        "A2": {
+            ("frontal_left", "frontal_right"): 0.8,
+            ("frontal_left", "parietal_left"): 0.75,
+            ("frontal_left", "parietal_right"): 0.25,
+            ("frontal_right", "parietal_left"): 0.15,
+            ("frontal_right", "parietal_right"): 0.35,
+            ("parietal_left", "parietal_right"): 0.65,
+        },
+        "B1": {
+            ("frontal_left", "frontal_right"): 0.2,
+            ("frontal_left", "parietal_left"): 0.1,
+            ("frontal_left", "parietal_right"): 0.45,
+            ("frontal_right", "parietal_left"): 0.55,
+            ("frontal_right", "parietal_right"): 0.85,
+            ("parietal_left", "parietal_right"): 0.5,
+        },
+        "B2": {
+            ("frontal_left", "frontal_right"): 0.25,
+            ("frontal_left", "parietal_left"): 0.15,
+            ("frontal_left", "parietal_right"): 0.4,
+            ("frontal_right", "parietal_left"): 0.5,
+            ("frontal_right", "parietal_right"): 0.8,
+            ("parietal_left", "parietal_right"): 0.45,
+        },
+    }
+    connectivity_rows = []
+    for subject_id, pairs in pair_values.items():
+        subject_row = subjects.loc[subjects["subject_id"] == subject_id].iloc[0]
+        for (roi_from, roi_to), value in pairs.items():
+            connectivity_rows.append(
+                {
+                    "dataset_id": "synthetic",
+                    "metric": "conn_coh",
+                    "subject_id": subject_id,
+                    "idx": subject_row["idx"],
+                    "base_subject_id": subject_row["base_subject_id"],
+                    "group_label": subject_row["group_label"],
+                    "mtime": subject_row["mtime"],
+                    "trial_id": 1,
+                    "freq": 10.0,
+                    "roi_from": roi_from,
+                    "roi_to": roi_to,
+                    "value": 0.0,
+                }
+            )
+            connectivity_rows.append(
+                {
+                    "dataset_id": "synthetic",
+                    "metric": "conn_coh",
+                    "subject_id": subject_id,
+                    "idx": subject_row["idx"],
+                    "base_subject_id": subject_row["base_subject_id"],
+                    "group_label": subject_row["group_label"],
+                    "mtime": subject_row["mtime"],
+                    "trial_id": 2,
+                    "freq": 10.0,
+                    "roi_from": roi_from,
+                    "roi_to": roi_to,
+                    "value": float(value),
+                }
+            )
+    return DatasetBundle(
+        dataset_id="synthetic",
+        metric="conn_coh",
+        channels=rois,
         trial_ids=[1, 2],
         frequencies=[10.0],
         subjects=subjects,
@@ -217,6 +452,337 @@ class AnalysisTests(unittest.TestCase):
         for pair in result["pair_results"]:
             if pair["p_value"] == pair["p_value"]:
                 self.assertAlmostEqual(pair["p_value"], pair["q_value"])
+
+    def test_excluded_idx_removes_all_measurements_for_that_person(self) -> None:
+        bundle = make_regression_test_bundle()
+        result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="All",
+                correction_method="none",
+                group_a=ALL_GROUPS_VALUE,
+                group_b=ALL_GROUPS_VALUE,
+                excluded_idx=("1",),
+            ),
+        )
+        pair = result["pair_results"][0]
+        observed_idx = {str(record["idx"]) for record in pair["detail_records"]}
+        self.assertNotIn("1", observed_idx)
+        self.assertEqual(pair["n"], 10)
+
+    def test_leave_one_out_returns_one_run_per_remaining_idx_and_ranks_outlier(self) -> None:
+        bundle = make_outlier_test_bundle()
+        config = AnalysisConfig(
+            dataset_id="synthetic",
+            metric="conn_coh",
+            trial_a=1,
+            trial_b=2,
+            freq_min=10.0,
+            freq_max=10.0,
+            mtime_filter="M1",
+            correction_method="none",
+            group_a="A",
+            group_b="B",
+        )
+        result = run_leave_one_out_analysis(
+            bundle,
+            config,
+            "roi_a|roi_b",
+            significance_threshold=0.05,
+            outcome_variable=SELECTED_EDGE_DELTA_VALUE,
+            regression_covariates=["age"],
+        )
+        self.assertEqual(len(result["global_records"]), 4)
+        self.assertEqual(len(result["pair_records"]), 4)
+        self.assertEqual({row["excluded_idx"] for row in result["global_records"][:2]}, {"3", "4"})
+        self.assertEqual({row["excluded_idx"] for row in result["pair_records"][:2]}, {"3", "4"})
+        self.assertIn("4", result["top3_idx"])
+
+    def test_regression_influence_contains_expected_diagnostic_lengths(self) -> None:
+        bundle = make_regression_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="M1",
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+            ),
+        )
+        result = run_regression_influence_analysis(
+            bundle,
+            analysis_result,
+            "roi_a|roi_b",
+            outcome_variable=SELECTED_EDGE_DELTA_VALUE,
+            regression_covariates=["age"],
+        )
+        diagnostics = result["diagnostics"]
+        self.assertEqual(len(diagnostics["observed"]), result["n"])
+        self.assertEqual(len(diagnostics["leverage"]), result["n"])
+        self.assertEqual(len(diagnostics["cooks_distance"]), result["n"])
+        self.assertEqual(len(diagnostics["studentized_residuals"]), result["n"])
+        self.assertEqual(len(diagnostics["observation_rows"]), result["n"])
+        self.assertTrue(all("idx" in row for row in diagnostics["observation_rows"]))
+
+    def test_derive_roi_metadata_infers_hemisphere_class_and_homologue(self) -> None:
+        metadata = derive_roi_metadata(["frontal_left", "frontal_right", "occipital"])
+        self.assertEqual(metadata[0]["hemisphere"], "left")
+        self.assertEqual(metadata[0]["anatomical_class"], "frontal")
+        self.assertEqual(metadata[0]["homologue"], "frontal_right")
+        self.assertEqual(metadata[2]["hemisphere"], "midline")
+        self.assertIsNone(metadata[2]["homologue"])
+
+    def test_network_analysis_returns_summary_graph_module_and_nbs_outputs(self) -> None:
+        bundle = make_network_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="M1",
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+            ),
+        )
+        result = run_network_analysis(
+            bundle,
+            analysis_result,
+            NetworkAnalysisConfig(
+                mode="summary",
+                metric_name="roi_mean_connectivity",
+                threshold_mode="absolute weight",
+                threshold_value=0.3,
+                nbs_permutations=20,
+            ),
+        )
+        summary_records = result["network_summary_results"]["results"]
+        self.assertTrue(any(record["score_family"] == "roi_mean_connectivity" for record in summary_records))
+        self.assertTrue(any(record["score_family"] == "within_network_connectivity" for record in summary_records))
+        self.assertTrue(any(record["score_family"] == "laterality_index" for record in summary_records))
+        self.assertTrue(result["graph_metric_results"]["global"]["results"])
+        self.assertTrue(result["graph_metric_results"]["node"]["results"])
+        self.assertIn("communities", result["community_results"])
+        self.assertIn("components", result["nbs_results"])
+
+    def test_network_thresholding_changes_degree_metrics(self) -> None:
+        bundle = make_network_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="M1",
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+            ),
+        )
+        baseline = run_network_analysis(bundle, analysis_result, NetworkAnalysisConfig(metric_name="degree", threshold_mode="none", nbs_permutations=20))
+        thresholded = run_network_analysis(
+            bundle,
+            analysis_result,
+            NetworkAnalysisConfig(metric_name="degree", threshold_mode="absolute weight", threshold_value=0.7, nbs_permutations=20),
+        )
+        baseline_degree = next(record for record in baseline["graph_metric_results"]["node"]["results"] if record["score_family"] == "degree")
+        thresholded_degree = next(record for record in thresholded["graph_metric_results"]["node"]["results"] if record["score_family"] == "degree")
+        self.assertNotEqual(baseline_degree["mean_delta"], thresholded_degree["mean_delta"])
+
+    def test_network_summary_contains_global_laterality_score(self) -> None:
+        bundle = make_network_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="M1",
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+            ),
+        )
+        result = run_network_analysis(bundle, analysis_result, NetworkAnalysisConfig(metric_name="laterality_index", nbs_permutations=20))
+        labels = {record["score_key"] for record in result["network_summary_results"]["results"]}
+        self.assertIn("laterality::global", labels)
+
+    def test_dashboard_layout_contains_network_tab(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        dataset_dir = repo_root / "data" / "raw" / "REST_24_Stroke"
+        app = create_dashboard(
+            dataset_dir=dataset_dir,
+            initial_bundle=self.bundle,
+            json_files=["data_coh.json"],
+            csv_files=["info.csv"],
+            initial_json="data_coh.json",
+            initial_csv="info.csv",
+        )
+        main_tabs = app.layout.children[4].children[0]
+        tab_labels = [tab.label for tab in main_tabs.children]
+        self.assertIn("Network", tab_labels)
+        self.assertIn("Patterns", tab_labels)
+        self.assertNotIn("Covariates", tab_labels)
+        layout_repr = repr(app.layout)
+        self.assertIn("heatmap-longitudinal-model", layout_repr)
+        self.assertIn("heatmap-longitudinal-fit-chart", layout_repr)
+        self.assertIn("heatmap-reliable-change-chart", layout_repr)
+
+    def test_longitudinal_detail_analysis_returns_models_trajectory_and_reliable_change(self) -> None:
+        bundle = make_longitudinal_detail_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+                longitudinal_enabled=True,
+                longitudinal_require_pairs=False,
+                longitudinal_column="mtime",
+                longitudinal_value_a="M1",
+                longitudinal_value_b="M2",
+            ),
+        )
+        result = run_longitudinal_detail_analysis(
+            bundle,
+            analysis_result,
+            "roi_a|roi_b",
+            config=LongitudinalDetailConfig(
+                model_family="mixed_effects",
+                random_slope_time=True,
+                baseline_value="M1",
+                followup_value="M2",
+            ),
+            regression_covariates=["age"],
+        )
+        self.assertIsNone(result["message"])
+        self.assertIn("primary_model", result)
+        self.assertIn("change_score", result)
+        self.assertIn("ancova", result)
+        self.assertIn("trajectory", result)
+        self.assertIn("reliable_change", result)
+        self.assertFalse(result["primary_model"].get("random_slope_used", False))
+        self.assertEqual(result["trajectory"]["ordered_timepoints"], ["M1", "M2", "M3"])
+        self.assertTrue(result["reliable_change"]["records"])
+
+    def test_longitudinal_change_score_and_ancova_require_paired_subjects(self) -> None:
+        bundle = make_regression_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+                longitudinal_enabled=True,
+                longitudinal_require_pairs=False,
+                longitudinal_column="mtime",
+                longitudinal_value_a="M1",
+                longitudinal_value_b="M2",
+            ),
+        )
+        result = run_longitudinal_detail_analysis(
+            bundle,
+            analysis_result,
+            "roi_a|roi_b",
+            config=LongitudinalDetailConfig(model_family="change_score", baseline_value="M1", followup_value="M2"),
+            regression_covariates=["age"],
+        )
+        self.assertIn("change_score", result)
+        self.assertIsNone(result["change_score"].get("message"))
+        self.assertIsNone(result["ancova"].get("message"))
+
+    def test_patterns_feature_data_builds_subject_by_edge_matrix(self) -> None:
+        bundle = make_network_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="M1",
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+            ),
+        )
+        feature_data = build_patterns_feature_data(bundle, analysis_result, PatternsAnalysisConfig())
+        self.assertEqual(feature_data["matrix"].shape[0], 4)
+        self.assertEqual(feature_data["matrix"].shape[1], 6)
+        self.assertIn("age", feature_data["metadata"].columns)
+
+    def test_patterns_analysis_returns_embedding_clustering_feature_and_pls_outputs(self) -> None:
+        bundle = make_network_test_bundle()
+        analysis_result = run_analysis(
+            bundle,
+            AnalysisConfig(
+                dataset_id="synthetic",
+                metric="conn_coh",
+                trial_a=1,
+                trial_b=2,
+                freq_min=10.0,
+                freq_max=10.0,
+                mtime_filter="M1",
+                correction_method="none",
+                group_a="A",
+                group_b="B",
+            ),
+        )
+        result = run_patterns_analysis(
+            bundle,
+            analysis_result,
+            PatternsAnalysisConfig(
+                mode="embedding",
+                embedding_method="pca",
+                cluster_method="hierarchical",
+                feature_pattern_level="edges",
+                cca_pls_method="pls",
+                behavior_variables=("age", "score"),
+                n_components=2,
+            ),
+        )
+        self.assertEqual(result["embedding_results"]["method"], "pca")
+        self.assertEqual(len(result["embedding_results"]["metadata"]), 4)
+        self.assertEqual(result["subject_cluster_results"]["method"], "hierarchical")
+        self.assertEqual(result["feature_pattern_results"]["level"], "edges")
+        self.assertEqual(result["brain_behavior_results"]["method"], "pls")
+        self.assertEqual(result["brain_behavior_results"]["behavior_variables"], ["age", "score"])
 
     def test_longitudinal_delta_analysis_pairs_by_idx(self) -> None:
         config = AnalysisConfig(
