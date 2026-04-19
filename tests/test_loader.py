@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from data_vis_py.io.dataset_loader import load_dataset
+from data_vis_py.io.dataset_loader import list_datasets, load_dataset
 
 
 class DatasetLoaderTests(unittest.TestCase):
@@ -17,7 +17,14 @@ class DatasetLoaderTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
+        self.raw_root = self.repo_root / "data" / "raw"
         self.dataset_dir = self.repo_root / "data" / "raw" / "REST_24_Stroke"
+
+    def test_lists_available_dataset_directories(self) -> None:
+        dataset_ids = list_datasets(self.raw_root)
+
+        self.assertIn("REST_24_Stroke", dataset_ids)
+        self.assertIn("sleep", dataset_ids)
 
     def test_loads_and_normalizes_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

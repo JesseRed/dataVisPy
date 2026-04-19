@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ import plotly.graph_objects as go
 import scipy.stats as stats
 from dash import Dash, Input, Output, State, callback_context, dcc, html
 
-from data_vis_py.io.dataset_loader import DatasetBundle, load_dataset
+from data_vis_py.io.dataset_loader import DatasetBundle, list_dataset_files, load_dataset
 from data_vis_py.stats.analysis import (
     ALL_GROUPS_LABEL,
     ALL_GROUPS_VALUE,
@@ -78,7 +79,9 @@ PATTERNS_MODE_OPTIONS = [
 
 
 def create_dashboard(
-    dataset_dir,
+    raw_root: Path,
+    dataset_ids: list[str],
+    initial_dataset: str,
     initial_bundle: DatasetBundle,
     json_files: list[str],
     csv_files: list[str],
@@ -106,8 +109,8 @@ def create_dashboard(
             html.Div(
                 [
                     html.H2("MEG Connectivity Explorer"),
-                    html.P("Interactive paired contrasts with edge, network, and covariate drill-down analysis for REST_24_Stroke."),
-                    _sidebar(initial_bundle, numeric_subject_columns, group_options, json_files, csv_files, initial_json, initial_csv),
+                    html.P("Interactive paired contrasts with edge, network, and covariate drill-down analysis for MEG connectivity datasets."),
+                    _sidebar(initial_bundle, dataset_ids, initial_dataset, numeric_subject_columns, group_options, json_files, csv_files, initial_json, initial_csv),
                     html.Div(id="analysis-summary", className="panel"),
                 ],
                 className="sidebar",
@@ -522,11 +525,15 @@ def create_dashboard(
         },
     )
 
-    def current_bundle(json_filename: str, csv_filename: str) -> DatasetBundle:
-        return load_dataset(dataset_dir, json_filename=json_filename, csv_filename=csv_filename)
+    def current_dataset_dir(dataset_id: str) -> Path:
+        return raw_root / dataset_id
+
+    def current_bundle(dataset_id: str, json_filename: str, csv_filename: str) -> DatasetBundle:
+        return load_dataset(current_dataset_dir(dataset_id), json_filename=json_filename, csv_filename=csv_filename)
 
     def resolve_analysis_context(
         *,
+        dataset_id: str,
         json_filename: str,
         csv_filename: str,
         group_a: str,
@@ -544,13 +551,18 @@ def create_dashboard(
         correction_method: str,
         excluded_idx: list[str] | None,
     ) -> tuple[DatasetBundle, AnalysisConfig, dict[str, Any], str]:
-        bundle = current_bundle(json_filename, csv_filename)
+        bundle = current_bundle(dataset_id, json_filename, csv_filename)
         longitudinal_enabled = "enabled" in (longitudinal_enabled_flags or [])
         longitudinal_require_pairs = "paired_only" in (longitudinal_pairing_flags or [])
         if BAND_PRESETS.get(band_preset):
             freq_min, freq_max = BAND_PRESETS[band_preset]
-        freq_min = float(freq_min)
-        freq_max = float(freq_max)
+        positive_frequencies = [frequency for frequency in bundle.frequencies if frequency > 0]
+        min_frequency = min(positive_frequencies) if positive_frequencies else min(bundle.frequencies)
+        max_frequency = max(positive_frequencies) if positive_frequencies else max(bundle.frequencies)
+        freq_min = float(freq_min if freq_min is not None else min_frequency)
+        freq_max = float(freq_max if freq_max is not None else max_frequency)
+        freq_min = min(max(freq_min, min_frequency), max_frequency)
+        freq_max = min(max(freq_max, min_frequency), max_frequency)
         if freq_min > freq_max:
             freq_min, freq_max = freq_max, freq_min
         config = AnalysisConfig(
@@ -576,6 +588,80 @@ def create_dashboard(
         return bundle, config, analysis_result, effective_analysis_mode
 
     @app.callback(
+        Output("json-file", "options"),
+        Output("json-file", "value"),
+        Output("csv-file", "options"),
+        Output("csv-file", "value"),
+        Input("dataset-id", "value"),
+        State("json-file", "value"),
+        State("csv-file", "value"),
+    )
+    def sync_dataset_files(dataset_id: str, current_json: str | None, current_csv: str | None):
+        files = list_dataset_files(current_dataset_dir(dataset_id))
+        json_value = current_json if current_json in files["json_files"] else ("data_coh.json" if "data_coh.json" in files["json_files"] else files["json_files"][0])
+        csv_value = current_csv if current_csv in files["csv_files"] else ("info.csv" if "info.csv" in files["csv_files"] else files["csv_files"][0])
+        return (
+            [{"label": name, "value": name} for name in files["json_files"]],
+            json_value,
+            [{"label": name, "value": name} for name in files["csv_files"]],
+            csv_value,
+        )
+
+    @app.callback(
+        Output("metric-name", "options"),
+        Output("metric-name", "value"),
+        Output("trial-a", "options"),
+        Output("trial-a", "value"),
+        Output("trial-b", "options"),
+        Output("trial-b", "value"),
+        Output("mtime-filter", "options"),
+        Output("mtime-filter", "value"),
+        Output("freq-min", "min"),
+        Output("freq-min", "max"),
+        Output("freq-max", "min"),
+        Output("freq-max", "max"),
+        Input("dataset-id", "value"),
+        Input("json-file", "value"),
+        Input("csv-file", "value"),
+        State("trial-a", "value"),
+        State("trial-b", "value"),
+        State("mtime-filter", "value"),
+    )
+    def sync_dataset_specific_controls(
+        dataset_id: str,
+        json_filename: str,
+        csv_filename: str,
+        current_trial_a: int | None,
+        current_trial_b: int | None,
+        current_mtime_filter: str | None,
+    ):
+        bundle = current_bundle(dataset_id, json_filename, csv_filename)
+        trial_options = [{"label": str(trial_id), "value": trial_id} for trial_id in bundle.trial_ids]
+        trial_a_value = current_trial_a if current_trial_a in bundle.trial_ids else bundle.trial_ids[0]
+        default_trial_b = bundle.trial_ids[1] if len(bundle.trial_ids) > 1 else bundle.trial_ids[0]
+        trial_b_value = current_trial_b if current_trial_b in bundle.trial_ids else default_trial_b
+        mtime_values = sorted(bundle.subjects["mtime"].dropna().unique())
+        mtime_options = [{"label": "All", "value": "All"}] + [{"label": label, "value": label} for label in mtime_values]
+        mtime_filter_value = current_mtime_filter if current_mtime_filter in {"All", *mtime_values} else "All"
+        positive_frequencies = [frequency for frequency in bundle.frequencies if frequency > 0]
+        min_frequency = min(positive_frequencies) if positive_frequencies else min(bundle.frequencies)
+        max_frequency = max(positive_frequencies) if positive_frequencies else max(bundle.frequencies)
+        return (
+            [{"label": bundle.metric, "value": bundle.metric}],
+            bundle.metric,
+            trial_options,
+            trial_a_value,
+            trial_options,
+            trial_b_value,
+            mtime_options,
+            mtime_filter_value,
+            min_frequency,
+            max_frequency,
+            min_frequency,
+            max_frequency,
+        )
+
+    @app.callback(
         Output("group-a", "options"),
         Output("group-a", "value"),
         Output("group-b", "options"),
@@ -593,11 +679,12 @@ def create_dashboard(
         Output("patterns-color-variable", "value"),
         Output("patterns-behavior-variables", "options"),
         Output("patterns-behavior-variables", "value"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
     )
-    def sync_file_dependent_controls(json_filename: str, csv_filename: str):
-        bundle = current_bundle(json_filename, csv_filename)
+    def sync_file_dependent_controls(dataset_id: str, json_filename: str, csv_filename: str):
+        bundle = current_bundle(dataset_id, json_filename, csv_filename)
         groups = sorted(bundle.subjects["group_label"].dropna().astype(str).unique().tolist())
         group_options = [{"label": ALL_GROUPS_LABEL, "value": ALL_GROUPS_VALUE}] + [{"label": group, "value": group} for group in groups]
         numeric_columns = [
@@ -639,6 +726,7 @@ def create_dashboard(
 
     @app.callback(
         Output("excluded-idx-checklist", "value"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
         Input("outlier-reset-exclusions", "n_clicks"),
@@ -648,6 +736,7 @@ def create_dashboard(
         State("outlier-top3-store", "data"),
     )
     def update_excluded_idx_selection(
+        dataset_id: str,
         json_filename: str,
         csv_filename: str,
         reset_clicks: int,
@@ -656,11 +745,11 @@ def create_dashboard(
         options: list[dict[str, Any]] | None,
         top3_candidates: list[str] | None,
     ) -> list[str]:
-        _ = current_bundle(json_filename, csv_filename)
+        _ = current_bundle(dataset_id, json_filename, csv_filename)
         valid_values = {str(option["value"]) for option in (options or [])}
         current = [str(value) for value in (current_value or []) if str(value) in valid_values]
         triggered = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else ""
-        if triggered in {"json-file", "csv-file"}:
+        if triggered in {"dataset-id", "json-file", "csv-file"}:
             return current
         if triggered == "outlier-reset-exclusions":
             return []
@@ -693,14 +782,15 @@ def create_dashboard(
         Output("longitudinal-value-b", "options"),
         Output("longitudinal-value-a", "value"),
         Output("longitudinal-value-b", "value"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
         Input("longitudinal-enabled", "value"),
     )
-    def sync_longitudinal_value_options(json_filename: str, csv_filename: str, enabled_flags: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any, Any]:
+    def sync_longitudinal_value_options(dataset_id: str, json_filename: str, csv_filename: str, enabled_flags: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any, Any]:
         if "enabled" not in (enabled_flags or []):
             return [], [], None, None
-        bundle = current_bundle(json_filename, csv_filename)
+        bundle = current_bundle(dataset_id, json_filename, csv_filename)
         values = [value for value in bundle.subjects["mtime"].dropna().unique().tolist()]
         values = sorted(values, key=lambda item: str(item))
         options = [{"label": str(value), "value": value} for value in values]
@@ -711,18 +801,25 @@ def create_dashboard(
     @app.callback(
         Output("selected-pair", "data"),
         Input("heatmap", "clickData"),
+        Input("dataset-id", "value"),
+        Input("json-file", "value"),
+        Input("csv-file", "value"),
         State("selected-pair", "data"),
         prevent_initial_call=True,
     )
-    def select_pair(click_data: dict[str, Any] | None, current_pair: str) -> str:
+    def select_pair(click_data: dict[str, Any] | None, dataset_id: str, json_filename: str, csv_filename: str, current_pair: str) -> str:
+        bundle = current_bundle(dataset_id, json_filename, csv_filename)
+        default_pair = f"{bundle.channels[0]}|{bundle.channels[1]}"
+        triggered = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else ""
+        if triggered in {"dataset-id", "json-file", "csv-file"}:
+            return default_pair
         if not click_data or not click_data.get("points"):
-            return current_pair
+            return current_pair if current_pair else default_pair
         point = click_data["points"][0]
         roi_from = point.get("y")
         roi_to = point.get("x")
-        if roi_from == roi_to:
-            return current_pair
-        bundle = initial_bundle
+        if roi_from == roi_to or roi_from not in bundle.channels or roi_to not in bundle.channels:
+            return current_pair if current_pair else default_pair
         ordered = sorted([roi_from, roi_to], key=bundle.channels.index)
         return f"{ordered[0]}|{ordered[1]}"
 
@@ -745,6 +842,7 @@ def create_dashboard(
         Output("heatmap-longitudinal-trajectory-chart", "figure"),
         Output("heatmap-reliable-change-summary", "children"),
         Output("heatmap-reliable-change-chart", "figure"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
         Input("group-a", "value"),
@@ -775,6 +873,7 @@ def create_dashboard(
         Input("selected-pair", "data"),
     )
     def update_dashboard(
+        dataset_id: str,
         json_filename: str,
         csv_filename: str,
         group_a: str,
@@ -805,6 +904,7 @@ def create_dashboard(
         selected_pair: str,
     ) -> tuple[Any, Any, go.Figure, go.Figure, Any, go.Figure, Any, Any, go.Figure, go.Figure, Any, go.Figure, go.Figure, Any, Any, go.Figure, Any, go.Figure]:
         bundle, _, analysis_result, effective_analysis_mode = resolve_analysis_context(
+            dataset_id=dataset_id,
             json_filename=json_filename,
             csv_filename=csv_filename,
             group_a=group_a,
@@ -935,6 +1035,7 @@ def create_dashboard(
         Output("network-primary-chart", "figure"),
         Output("network-secondary-summary", "children"),
         Output("network-secondary-chart", "figure"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
         Input("group-a", "value"),
@@ -960,6 +1061,7 @@ def create_dashboard(
         Input("excluded-idx-store", "data"),
     )
     def update_network_dashboard(
+        dataset_id: str,
         json_filename: str,
         csv_filename: str,
         group_a: str,
@@ -985,6 +1087,7 @@ def create_dashboard(
         excluded_idx: list[str] | None,
     ) -> tuple[Any, Any, go.Figure, Any, go.Figure]:
         bundle, _, analysis_result, _ = resolve_analysis_context(
+            dataset_id=dataset_id,
             json_filename=json_filename,
             csv_filename=csv_filename,
             group_a=group_a,
@@ -1031,6 +1134,7 @@ def create_dashboard(
         Output("patterns-primary-chart", "figure"),
         Output("patterns-secondary-summary", "children"),
         Output("patterns-secondary-chart", "figure"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
         Input("group-a", "value"),
@@ -1060,6 +1164,7 @@ def create_dashboard(
         Input("excluded-idx-store", "data"),
     )
     def update_patterns_dashboard(
+        dataset_id: str,
         json_filename: str,
         csv_filename: str,
         group_a: str,
@@ -1089,6 +1194,7 @@ def create_dashboard(
         excluded_idx: list[str] | None,
     ) -> tuple[Any, Any, go.Figure, Any, go.Figure]:
         bundle, _, analysis_result, _ = resolve_analysis_context(
+            dataset_id=dataset_id,
             json_filename=json_filename,
             csv_filename=csv_filename,
             group_a=group_a,
@@ -1178,6 +1284,7 @@ def create_dashboard(
         Output("outlier-regression-leverage-chart", "figure"),
         Output("outlier-regression-cook-chart", "figure"),
         Input("main-tabs", "value"),
+        Input("dataset-id", "value"),
         Input("json-file", "value"),
         Input("csv-file", "value"),
         Input("group-a", "value"),
@@ -1202,6 +1309,7 @@ def create_dashboard(
     )
     def update_outlier_dashboard(
         active_tab: str,
+        dataset_id: str,
         json_filename: str,
         csv_filename: str,
         group_a: str,
@@ -1229,7 +1337,7 @@ def create_dashboard(
             empty = _empty_figure("Outlier analysis")
             return [], placeholder, empty, placeholder, empty, placeholder, empty, empty
 
-        bundle = current_bundle(json_filename, csv_filename)
+        bundle = current_bundle(dataset_id, json_filename, csv_filename)
         longitudinal_enabled = "enabled" in (longitudinal_enabled_flags or [])
         longitudinal_require_pairs = "paired_only" in (longitudinal_pairing_flags or [])
         if BAND_PRESETS.get(band_preset):
@@ -1310,6 +1418,8 @@ def create_dashboard(
 
 def _sidebar(
     bundle: DatasetBundle,
+    dataset_ids: list[str],
+    initial_dataset: str,
     numeric_subject_columns: list[str],
     group_options: list[str],
     json_files: list[str],
@@ -1329,7 +1439,12 @@ def _sidebar(
     return html.Div(
         [
             html.Label("Dataset"),
-            dcc.Dropdown(options=[{"label": bundle.dataset_id, "value": bundle.dataset_id}], value=bundle.dataset_id, disabled=True),
+            dcc.Dropdown(
+                id="dataset-id",
+                options=[{"label": dataset_id, "value": dataset_id} for dataset_id in dataset_ids],
+                value=initial_dataset,
+                clearable=False,
+            ),
             html.Label("JSON file"),
             dcc.Dropdown(
                 id="json-file",
@@ -1345,7 +1460,7 @@ def _sidebar(
                 clearable=False,
             ),
             html.Label("Metric"),
-            dcc.Dropdown(options=[{"label": bundle.metric, "value": bundle.metric}], value=bundle.metric, disabled=True),
+            dcc.Dropdown(id="metric-name", options=[{"label": bundle.metric, "value": bundle.metric}], value=bundle.metric, disabled=True),
             html.Label("Trial A"),
             dcc.Dropdown(id="trial-a", options=trial_options, value=bundle.trial_ids[0], clearable=False),
             html.Label("Trial B"),

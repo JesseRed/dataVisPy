@@ -53,37 +53,43 @@ def load_dataset(
             and metadata.get("json_filename") == selected_json
             and metadata.get("csv_filename") == selected_csv
         ):
-            connectivity = pd.read_parquet(connectivity_cache)
-            subjects = pd.read_parquet(subjects_cache)
-            return DatasetBundle(
-                dataset_id=metadata["dataset_id"],
-                metric=metadata["metric"],
-                connectivity=connectivity,
-                subjects=subjects,
-                channels=metadata["channels"],
-                trial_ids=metadata["trial_ids"],
-                frequencies=metadata["frequencies"],
-            )
+            try:
+                connectivity = pd.read_parquet(connectivity_cache)
+                subjects = pd.read_parquet(subjects_cache)
+                return DatasetBundle(
+                    dataset_id=metadata["dataset_id"],
+                    metric=metadata["metric"],
+                    connectivity=connectivity,
+                    subjects=subjects,
+                    channels=metadata["channels"],
+                    trial_ids=metadata["trial_ids"],
+                    frequencies=metadata["frequencies"],
+                )
+            except ImportError:
+                pass
 
     bundle = _load_from_raw(dataset_path, selected_json, selected_csv)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    bundle.connectivity.to_parquet(connectivity_cache, index=False)
-    bundle.subjects.to_parquet(subjects_cache, index=False)
-    metadata_cache.write_text(
-        json.dumps(
-            {
-                "cache_version": CACHE_VERSION,
-                "dataset_id": bundle.dataset_id,
-                "metric": bundle.metric,
-                "json_filename": selected_json,
-                "csv_filename": selected_csv,
-                "channels": bundle.channels,
-                "trial_ids": bundle.trial_ids,
-                "frequencies": bundle.frequencies,
-            },
-            indent=2,
+    try:
+        bundle.connectivity.to_parquet(connectivity_cache, index=False)
+        bundle.subjects.to_parquet(subjects_cache, index=False)
+        metadata_cache.write_text(
+            json.dumps(
+                {
+                    "cache_version": CACHE_VERSION,
+                    "dataset_id": bundle.dataset_id,
+                    "metric": bundle.metric,
+                    "json_filename": selected_json,
+                    "csv_filename": selected_csv,
+                    "channels": bundle.channels,
+                    "trial_ids": bundle.trial_ids,
+                    "frequencies": bundle.frequencies,
+                },
+                indent=2,
+            )
         )
-    )
+    except ImportError:
+        pass
     return bundle
 
 
@@ -94,6 +100,19 @@ def list_dataset_files(dataset_dir: Path | str) -> dict[str, list[str]]:
         "json_files": sorted(path.name for path in dataset_path.glob("*.json")),
         "csv_files": sorted(path.name for path in dataset_path.glob("*.csv")),
     }
+
+
+def list_datasets(raw_root: Path | str) -> list[str]:
+    """List dataset directories under the raw data root that contain selectable files."""
+    raw_root_path = Path(raw_root)
+    dataset_names: list[str] = []
+    for path in sorted(raw_root_path.iterdir()):
+        if not path.is_dir():
+            continue
+        files = list_dataset_files(path)
+        if files["json_files"] and files["csv_files"]:
+            dataset_names.append(path.name)
+    return dataset_names
 
 
 def _load_from_raw(dataset_path: Path, json_filename: str, csv_filename: str) -> DatasetBundle:
